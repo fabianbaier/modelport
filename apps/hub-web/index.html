@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>modelport hub</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <h1>modelport</h1>
+            <p>Local model tunnels for teams</p>
+          </div>
+        </div>
+        <div class="identity">
+          <label for="user-email">Dev user</label>
+          <input id="user-email" value="owner@modelport.dev" />
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="sidebar">
+          <form id="team-form" class="panel">
+            <h2>Create Team</h2>
+            <label>
+              Slug
+              <input name="slug" value="team-acme" autocomplete="off" />
+            </label>
+            <label>
+              Display name
+              <input name="display_name" value="Team Acme" autocomplete="off" />
+            </label>
+            <button type="submit">Create</button>
+          </form>
+
+          <div class="panel">
+            <h2>Teams</h2>
+            <div id="teams" class="stack"></div>
+          </div>
+        </aside>
+
+        <section class="content">
+          <div class="metrics">
+            <div>
+              <strong id="metric-services">0</strong>
+              <span>services</span>
+            </div>
+            <div>
+              <strong id="metric-sessions">0</strong>
+              <span>sessions</span>
+            </div>
+            <div>
+              <strong id="metric-models">0</strong>
+              <span>models</span>
+            </div>
+          </div>
+
+          <section class="band">
+            <div class="section-head">
+              <h2>Services</h2>
+              <button id="refresh" type="button">Refresh</button>
+            </div>
+            <div id="services" class="cards"></div>
+          </section>
+
+          <section class="band">
+            <h2>Sessions</h2>
+            <div id="sessions" class="table-wrap"></div>
+          </section>
+
+          <section class="band">
+            <h2>Audit</h2>
+            <div id="audit" class="timeline"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
