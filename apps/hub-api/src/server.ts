@@ -14,6 +14,7 @@ import {
   requireSlug,
   requireString,
   type Actor,
+  type AuthSession,
   type AuditEvent,
   type Device,
   type HubState,
@@ -27,7 +28,8 @@ import {
   type TunnelDirection,
   type TunnelHost,
   type TunnelService,
-  type TunnelSession
+  type TunnelSession,
+  type User
 } from "../../../packages/protocol/src/index.js";
 import { JsonStore } from "./state.js";
 
@@ -35,6 +37,8 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_TUNNEL_HOST = "127.0.0.1";
 const DEFAULT_TUNNEL_PORT = 2222;
 const DEFAULT_TUNNEL_USER = "modelport";
+const SESSION_COOKIE = "modelport_session";
+const SESSION_TTL_DAYS = 30;
 
 export interface HubServerOptions {
   dataDir: string;
@@ -42,13 +46,15 @@ export interface HubServerOptions {
   tunnelHost?: string;
   tunnelPort?: number;
   tunnelUser?: string;
+  publicBaseUrl?: string;
+  allowDevAuth?: boolean;
 }
 
 interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
   url: URL;
-  actor: Actor;
+  actor?: Actor;
   body: Record<string, unknown>;
 }
 
@@ -73,12 +79,41 @@ function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
-function shortToken(): string {
-  return randomBytes(18).toString("base64url");
+function sessionToken(): string {
+  return `mp_${randomBytes(32).toString("base64url")}`;
+}
+
+function inviteToken(): string {
+  return `invite_${randomBytes(32).toString("base64url")}`;
+}
+
+function tokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+function userIdForEmail(email: string): string {
+  return `dev_${createHash("sha256").update(email).digest("hex").slice(0, 16)}`;
 }
 
 function fingerprintForPublicKey(publicKey: string): string {
   return `SHA256:${createHash("sha256").update(publicKey).digest("base64url")}`;
+}
+
+function normalizeEmail(value: unknown): string {
+  const email = requireString(value, "email").toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    throw httpError(400, "invalid_email", "email must be a valid email address");
+  }
+  return email;
+}
+
+function isExpired(iso: string): boolean {
+  return Date.parse(iso) <= Date.now();
+}
+
+function sanitizedInvite(invite: Invite): Omit<Invite, "token_hash"> {
+  const { token_hash: _tokenHash, ...safeInvite } = invite;
+  return safeInvite;
 }
 
 function httpError(status: number, code: string, message: string): HttpError {
@@ -88,20 +123,75 @@ function httpError(status: number, code: string, message: string): HttpError {
   return err;
 }
 
-function actorFromRequest(req: IncomingMessage): Actor {
-  const auth = req.headers.authorization;
-  if (auth?.startsWith("Bearer dev:")) {
-    const email = auth.slice("Bearer dev:".length).trim();
-    if (email) {
-      return { user_id: `dev_${createHash("sha256").update(email).digest("hex").slice(0, 16)}`, email };
+function cookieValue(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers.cookie;
+  if (!raw) {
+    return undefined;
+  }
+  for (const part of raw.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) {
+      return decodeURIComponent(rest.join("="));
     }
+  }
+  return undefined;
+}
+
+function bearerToken(req: IncomingMessage): string | undefined {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) {
+    return undefined;
+  }
+  return auth.slice("Bearer ".length).trim();
+}
+
+function tokenFromRequest(req: IncomingMessage): string | undefined {
+  return bearerToken(req) || cookieValue(req, SESSION_COOKIE);
+}
+
+function devActorFromRequest(req: IncomingMessage, allowDevAuth: boolean): Actor | undefined {
+  if (!allowDevAuth) {
+    return undefined;
+  }
+  const token = bearerToken(req);
+  if (token?.startsWith("dev:")) {
+    const email = normalizeEmail(token.slice("dev:".length));
+    return { user_id: userIdForEmail(email), email };
   }
   const header = req.headers["x-modelport-user"];
   if (typeof header === "string" && header.trim()) {
-    const email = header.trim();
-    return { user_id: `dev_${createHash("sha256").update(email).digest("hex").slice(0, 16)}`, email };
+    const email = normalizeEmail(header);
+    return { user_id: userIdForEmail(email), email };
   }
-  return { user_id: "dev_local", email: "local@modelport.dev" };
+  if (process.env.NODE_ENV !== "production") {
+    return { user_id: userIdForEmail("local@modelport.dev"), email: "local@modelport.dev" };
+  }
+  return undefined;
+}
+
+async function actorFromRequest(req: IncomingMessage, store: JsonStore, allowDevAuth: boolean): Promise<Actor | undefined> {
+  const token = tokenFromRequest(req);
+  if (token && !token.startsWith("dev:")) {
+    const hash = tokenHash(token);
+    const state = await store.read();
+    const session = state.auth_sessions.find(
+      (item) => item.token_hash === hash && item.status === "active" && !isExpired(item.expires_at)
+    );
+    const user = session
+      ? state.users.find((item) => item.user_id === session.user_id && item.status === "active")
+      : undefined;
+    if (session && user) {
+      return { user_id: user.user_id, email: user.email };
+    }
+  }
+  return devActorFromRequest(req, allowDevAuth);
+}
+
+function requireActor(actor: Actor | undefined): Actor {
+  if (!actor) {
+    throw httpError(401, "auth_required", "sign in required");
+  }
+  return actor;
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -127,25 +217,58 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   }
 }
 
-function sendJson(res: ServerResponse, status: number, value: unknown): void {
+function sendJson(res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
   const data = JSON.stringify(value, null, 2);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
     "access-control-allow-headers": "authorization, content-type, x-modelport-user",
-    "access-control-allow-methods": "GET,POST,OPTIONS"
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    ...headers
   });
   res.end(`${data}\n`);
 }
 
-function sendNoContent(res: ServerResponse): void {
+function sendNoContent(res: ServerResponse, headers: Record<string, string> = {}): void {
   res.writeHead(204, {
     "access-control-allow-origin": "*",
     "access-control-allow-headers": "authorization, content-type, x-modelport-user",
-    "access-control-allow-methods": "GET,POST,OPTIONS"
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    ...headers
   });
   res.end();
+}
+
+function requestOrigin(req: IncomingMessage, publicBaseUrl?: string): string {
+  if (publicBaseUrl) {
+    return publicBaseUrl.replace(/\/+$/, "");
+  }
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const proto =
+    typeof forwardedProto === "string" && forwardedProto.trim()
+      ? forwardedProto.split(",")[0].trim()
+      : "http";
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const host =
+    typeof forwardedHost === "string" && forwardedHost.trim()
+      ? forwardedHost.split(",")[0].trim()
+      : req.headers.host || "127.0.0.1";
+  return `${proto}://${host}`;
+}
+
+function sessionCookie(req: IncomingMessage, token: string): string {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const isSecure =
+    process.env.MODELPORT_COOKIE_SECURE === "1" ||
+    (typeof forwardedProto === "string" && forwardedProto.split(",")[0].trim() === "https");
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${
+    SESSION_TTL_DAYS * 24 * 60 * 60
+  }${isSecure ? "; Secure" : ""}`;
+}
+
+function clearSessionCookie(): string {
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
 function addAudit(state: HubState, actor: Actor, event: Omit<AuditEvent, "event_id" | "actor_user_id" | "created_at">): void {
@@ -199,6 +322,38 @@ function requireService(state: HubState, serviceIdOrName: string, teamId: string
     throw httpError(403, "service_forbidden", "caller role is not allowed for this service");
   }
   return service;
+}
+
+function getOrCreateUser(state: HubState, email: string): User {
+  const userId = userIdForEmail(email);
+  const existing = state.users.find((item) => item.user_id === userId || item.email === email);
+  if (existing) {
+    existing.last_seen_at = nowIso();
+    existing.status = "active";
+    return existing;
+  }
+  const created: User = {
+    user_id: userId,
+    email,
+    created_at: nowIso(),
+    last_seen_at: nowIso(),
+    status: "active"
+  };
+  state.users.push(created);
+  return created;
+}
+
+function createSession(state: HubState, user: User, token: string): AuthSession {
+  const session: AuthSession = {
+    token_hash: tokenHash(token),
+    user_id: user.user_id,
+    created_at: nowIso(),
+    last_seen_at: nowIso(),
+    expires_at: daysFromNow(SESSION_TTL_DAYS),
+    status: "active"
+  };
+  state.auth_sessions.push(session);
+  return session;
 }
 
 function deviceForActor(state: HubState, actor: Actor, publicKey?: string, name?: string, platform?: string): Device {
@@ -312,8 +467,13 @@ function serveStatic(webDir: string, req: IncomingMessage, res: ServerResponse, 
   return true;
 }
 
-async function handleApi(ctx: RequestContext, store: JsonStore, opts: Required<Pick<HubServerOptions, "tunnelHost" | "tunnelPort" | "tunnelUser">>): Promise<void> {
-  const { req, res, url, actor, body } = ctx;
+async function handleApi(
+  ctx: RequestContext,
+  store: JsonStore,
+  opts: Required<Pick<HubServerOptions, "tunnelHost" | "tunnelPort" | "tunnelUser">> &
+    Pick<HubServerOptions, "publicBaseUrl">
+): Promise<void> {
+  const { req, res, url, body } = ctx;
   const parts = routeParts(url.pathname);
   const method = req.method || "GET";
 
@@ -327,10 +487,45 @@ async function handleApi(ctx: RequestContext, store: JsonStore, opts: Required<P
     return;
   }
 
+  if (method === "POST" && url.pathname === "/api/v1/auth/signup") {
+    const token = sessionToken();
+    const auth = await store.mutate((state) => {
+      const user = getOrCreateUser(state, normalizeEmail(body.email));
+      const session = createSession(state, user, token);
+      addAudit(state, { user_id: user.user_id, email: user.email }, {
+        kind: "user_signed_in",
+        message: `Signed in ${user.email}`,
+        metadata: { session_expires_at: session.expires_at }
+      });
+      return { user, session };
+    });
+    sendJson(res, 201, { user: auth.user, token, expires_at: auth.session.expires_at }, { "set-cookie": sessionCookie(req, token) });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/v1/auth/logout") {
+    const token = tokenFromRequest(req);
+    if (token) {
+      const hash = tokenHash(token);
+      await store.mutate((state) => {
+        for (const session of state.auth_sessions) {
+          if (session.token_hash === hash) {
+            session.status = "revoked";
+          }
+        }
+      });
+    }
+    sendNoContent(res, { "set-cookie": clearSessionCookie() });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/api/v1/me") {
+    const actor = requireActor(ctx.actor);
     sendJson(res, 200, { actor });
     return;
   }
+
+  const actor = requireActor(ctx.actor);
 
   if (method === "GET" && url.pathname === "/api/v1/teams") {
     const state = await store.read();
@@ -379,6 +574,7 @@ async function handleApi(ctx: RequestContext, store: JsonStore, opts: Required<P
   }
 
   if (method === "POST" && parts[0] === "api" && parts[2] === "teams" && parts[4] === "invites") {
+    const rawToken = inviteToken();
     const invite = await store.mutate((state) => {
       const team = findTeamByIdOrSlug(state, parts[3], actor);
       requireTeamAccess(state, team.team_id, actor, ["owner", "admin"]);
@@ -386,13 +582,14 @@ async function handleApi(ctx: RequestContext, store: JsonStore, opts: Required<P
       if (!isRole(roleRaw) || roleRaw === "owner") {
         throw httpError(400, "invalid_role", "invite role must be admin, member, or viewer");
       }
-      const email = requireString(body.email, "email");
+      const email = normalizeEmail(body.email);
       const created: Invite = {
         invite_id: id("invite"),
         team_id: team.team_id,
         email,
         role: roleRaw,
-        token_hint: shortToken().slice(0, 8),
+        token_hint: rawToken.slice(-8),
+        token_hash: tokenHash(rawToken),
         status: "created",
         created_at: nowIso(),
         expires_at: daysFromNow(7)
@@ -406,7 +603,68 @@ async function handleApi(ctx: RequestContext, store: JsonStore, opts: Required<P
       });
       return created;
     });
-    sendJson(res, 201, { invite });
+    const acceptUrl = `${requestOrigin(req, opts.publicBaseUrl)}/?invite=${encodeURIComponent(rawToken)}`;
+    sendJson(res, 201, { invite: sanitizedInvite(invite), token: rawToken, accept_url: acceptUrl });
+    return;
+  }
+
+  if (method === "GET" && parts[0] === "api" && parts[2] === "teams" && parts[4] === "invites") {
+    const state = await store.read();
+    const team = findTeamByIdOrSlug(state, parts[3], actor);
+    requireTeamAccess(state, team.team_id, actor, ["owner", "admin"]);
+    sendJson(res, 200, {
+      invites: state.invites.filter((item) => item.team_id === team.team_id).map((item) => sanitizedInvite(item))
+    });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/v1/invites/accept") {
+    const accepted = await store.mutate((state) => {
+      const rawToken = requireString(body.token, "token");
+      const invite = state.invites.find((item) => item.token_hash === tokenHash(rawToken));
+      if (!invite || invite.status === "revoked") {
+        throw httpError(404, "invite_not_found", "invite not found");
+      }
+      if (invite.status === "accepted") {
+        throw httpError(409, "invite_already_accepted", "invite already accepted");
+      }
+      if (invite.status === "expired" || isExpired(invite.expires_at)) {
+        invite.status = "expired";
+        throw httpError(410, "invite_expired", "invite expired");
+      }
+      if (normalizeEmail(invite.email) !== actor.email) {
+        throw httpError(403, "invite_email_mismatch", "sign in with the invited email address");
+      }
+      const team = state.teams.find((item) => item.team_id === invite.team_id && item.status === "active");
+      if (!team) {
+        throw httpError(404, "team_not_found", "team not found");
+      }
+      const existing = state.memberships.find((item) => item.team_id === invite.team_id && item.user_id === actor.user_id);
+      if (existing) {
+        existing.status = "active";
+        existing.role = invite.role;
+      } else {
+        state.memberships.push({
+          team_id: invite.team_id,
+          user_id: actor.user_id,
+          email: actor.email,
+          role: invite.role,
+          status: "active",
+          joined_at: nowIso()
+        });
+      }
+      invite.status = "accepted";
+      invite.accepted_by_user_id = actor.user_id;
+      invite.accepted_at = nowIso();
+      addAudit(state, actor, {
+        team_id: invite.team_id,
+        kind: "invite_accepted",
+        message: `${actor.email} joined ${team.slug}`,
+        metadata: { invite_id: invite.invite_id, role: invite.role }
+      });
+      return { team, membership: state.memberships.find((item) => item.team_id === invite.team_id && item.user_id === actor.user_id) };
+    });
+    sendJson(res, 200, accepted);
     return;
   }
 
@@ -708,6 +966,10 @@ export function createHubServer(options: HubServerOptions): Server {
   const tunnelHost = options.tunnelHost || process.env.MODELPORT_TUNNEL_HOST || DEFAULT_TUNNEL_HOST;
   const tunnelPort = Number(options.tunnelPort || process.env.MODELPORT_TUNNEL_PORT || DEFAULT_TUNNEL_PORT);
   const tunnelUser = options.tunnelUser || process.env.MODELPORT_TUNNEL_USER || DEFAULT_TUNNEL_USER;
+  const publicBaseUrl = options.publicBaseUrl || process.env.MODELPORT_PUBLIC_BASE_URL;
+  const allowDevAuth =
+    options.allowDevAuth ??
+    (process.env.MODELPORT_DEV_AUTH ? process.env.MODELPORT_DEV_AUTH === "1" : process.env.NODE_ENV !== "production");
   const store = new JsonStore(options.dataDir);
 
   return createServer(async (req, res) => {
@@ -722,10 +984,10 @@ export function createHubServer(options: HubServerOptions): Server {
         req,
         res,
         url,
-        actor: actorFromRequest(req),
+        actor: await actorFromRequest(req, store, allowDevAuth),
         body: await readBody(req)
       };
-      await handleApi(ctx, store, { tunnelHost, tunnelPort, tunnelUser });
+      await handleApi(ctx, store, { tunnelHost, tunnelPort, tunnelUser, publicBaseUrl });
     } catch (error) {
       const err = error as HttpError;
       sendJson(res, err.status || 500, {

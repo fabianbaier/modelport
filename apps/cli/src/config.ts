@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 export interface CliConfig {
   hub_url: string;
   user_email: string;
+  access_token?: string;
   public_key: string;
   device_name: string;
   platform: string;

@@ -21,12 +21,24 @@
           </div>
         </div>
         <div class="identity">
-          <label for="user-email">Dev user</label>
-          <input id="user-email" value="owner@modelport.dev" />
+          <span id="user-summary">Signed out</span>
+          <button id="sign-out" class="secondary" type="button" hidden>Sign out</button>
         </div>
       </header>
 
-      <section class="workspace">
+      <section id="auth-panel" class="auth-panel">
+        <form id="auth-form" class="panel auth-card">
+          <h2>Sign In</h2>
+          <label>
+            Email
+            <input id="auth-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+          </label>
+          <button type="submit">Continue</button>
+          <p id="auth-message" class="muted"></p>
+        </form>
+      </section>
+
+      <section id="workspace" class="workspace" hidden>
         <aside class="sidebar">
           <form id="team-form" class="panel">
             <h2>Create Team</h2>
@@ -39,6 +51,24 @@
               <input name="display_name" value="Team Acme" autocomplete="off" />
             </label>
             <button type="submit">Create</button>
+          </form>
+
+          <form id="invite-form" class="panel">
+            <h2>Invite</h2>
+            <label>
+              Email
+              <input name="email" type="email" autocomplete="off" placeholder="teammate@example.com" required />
+            </label>
+            <label>
+              Role
+              <select name="role">
+                <option value="member">member</option>
+                <option value="admin">admin</option>
+                <option value="viewer">viewer</option>
+              </select>
+            </label>
+            <button type="submit">Create invite</button>
+            <p id="invite-result" class="muted"></p>
           </form>
 
           <div class="panel">

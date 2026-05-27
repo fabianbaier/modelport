@@ -43,6 +43,35 @@ async function request<T>(baseUrl: string, path: string, user: string, body?: un
   return json;
 }
 
+async function signup(baseUrl: string, email: string): Promise<string> {
+  const response = await fetch(new URL("/api/v1/auth/signup", baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email })
+  });
+  const json = (await response.json()) as { token?: string; error?: { message?: string } };
+  if (!response.ok || !json.token) {
+    throw new Error(json.error?.message || `signup failed: ${response.status}`);
+  }
+  return json.token;
+}
+
+async function requestToken<T>(baseUrl: string, path: string, token: string, body?: unknown): Promise<T> {
+  const response = await fetch(new URL(path, baseUrl), {
+    method: body ? "POST" : "GET",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const json = (await response.json()) as T & { error?: { code?: string; message?: string } };
+  if (!response.ok) {
+    throw new Error(`${response.status} ${json.error?.code}: ${json.error?.message}`);
+  }
+  return json;
+}
+
 test("hub registers a service and issues purpose-bound SSH credentials", async () => {
   await withHub(async (baseUrl) => {
     const created = await request<{ team: { team_id: string } }>(baseUrl, "/api/v1/teams", "alice@example.com", {
@@ -112,6 +141,54 @@ test("hub registers a service and issues purpose-bound SSH credentials", async (
     assert.equal(connectCred.credential.restrictions.permit_open, serveCred.credential.ssh.hub_bind);
     assert.equal(connectCred.credential.ssh.open_target, serveCred.credential.ssh.hub_bind);
   });
+});
+
+test("public auth signs users in and accepts invite links", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "modelport-public-test-"));
+  const server = createHubServer({
+    dataDir,
+    webDir: resolve("apps/hub-web"),
+    tunnelHost: "hub.local",
+    tunnelPort: 2222,
+    tunnelUser: "modelport",
+    allowDevAuth: false,
+    publicBaseUrl: "https://modelport.example"
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, resolveListen));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.ok(address);
+  const baseUrl = `http://127.0.0.1:${(address as AddressInfo).port}`;
+  try {
+    const ownerToken = await signup(baseUrl, "owner@example.com");
+    await assert.rejects(
+      () => request(baseUrl, "/api/v1/teams", "owner@example.com"),
+      /401 auth_required/
+    );
+    const created = await requestToken<{ team: { team_id: string } }>(baseUrl, "/api/v1/teams", ownerToken, {
+      slug: "team-public"
+    });
+    const invite = await requestToken<{ accept_url: string; token: string }>(
+      baseUrl,
+      `/api/v1/teams/${created.team.team_id}/invites`,
+      ownerToken,
+      { email: "teammate@example.com", role: "member" }
+    );
+    assert.match(invite.accept_url, /^https:\/\/modelport\.example\/\?invite=invite_/);
+
+    const teammateToken = await signup(baseUrl, "teammate@example.com");
+    const accepted = await requestToken<{ team: { slug: string } }>(
+      baseUrl,
+      "/api/v1/invites/accept",
+      teammateToken,
+      { token: invite.token }
+    );
+    assert.equal(accepted.team.slug, "team-public");
+    const teams = await requestToken<{ teams: Array<{ slug: string }> }>(baseUrl, "/api/v1/teams", teammateToken);
+    assert.deepEqual(teams.teams.map((team) => team.slug), ["team-public"]);
+  } finally {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  }
 });
 
 test("hub rejects cross-team service discovery", async () => {
