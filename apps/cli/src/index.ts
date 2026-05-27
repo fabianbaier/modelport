@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createDevConfig, loadConfig, saveConfig } from "./config.js";
 import {
   parseHostPort,
@@ -359,7 +361,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isCliEntryPoint(): boolean {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return import.meta.url === `file://${process.argv[1]}`;
+  }
+}
+
+if (isCliEntryPoint()) {
   main().catch((error) => {
     console.error(`modelport: ${(error as Error).message}`);
     process.exit(1);
