@@ -451,6 +451,15 @@ function serveStatic(webDir: string, req: IncomingMessage, res: ServerResponse, 
     return false;
   }
   const stream = createReadStream(filePath);
+  stream.on("open", () => {
+    res.writeHead(200, { "content-type": contentType(pathname) });
+    if (req.method === "HEAD") {
+      stream.destroy();
+      res.end();
+    } else {
+      stream.pipe(res);
+    }
+  });
   stream.on("error", () => {
     if (url.pathname === "/") {
       sendJson(res, 404, { error: { code: "dashboard_missing", message: "dashboard files not found" } });
@@ -458,12 +467,6 @@ function serveStatic(webDir: string, req: IncomingMessage, res: ServerResponse, 
       sendJson(res, 404, { error: { code: "not_found", message: "not found" } });
     }
   });
-  res.writeHead(200, { "content-type": contentType(pathname) });
-  if (req.method === "HEAD") {
-    res.end();
-  } else {
-    stream.pipe(res);
-  }
   return true;
 }
 
