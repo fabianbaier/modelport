@@ -18,6 +18,23 @@ export interface Team {
   status: RecordStatus;
 }
 
+export interface User {
+  user_id: string;
+  email: string;
+  created_at: string;
+  last_seen_at: string;
+  status: RecordStatus;
+}
+
+export interface AuthSession {
+  token_hash: string;
+  user_id: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  status: RecordStatus;
+}
+
 export interface Membership {
   team_id: string;
   user_id: string;
@@ -33,9 +50,12 @@ export interface Invite {
   email: string;
   role: Role;
   token_hint: string;
+  token_hash?: string;
   status: "created" | "accepted" | "revoked" | "expired";
   created_at: string;
   expires_at: string;
+  accepted_by_user_id?: string;
+  accepted_at?: string;
 }
 
 export interface Device {
@@ -140,6 +160,8 @@ export interface AuditEvent {
 
 export interface HubState {
   schema_version: 1;
+  users: User[];
+  auth_sessions: AuthSession[];
   teams: Team[];
   memberships: Membership[];
   invites: Invite[];
@@ -156,6 +178,8 @@ export const DEFAULT_SERVICE_ROLES: Role[] = ["owner", "admin", "member"];
 export function emptyState(): HubState {
   return {
     schema_version: 1,
+    users: [],
+    auth_sessions: [],
     teams: [],
     memberships: [],
     invites: [],

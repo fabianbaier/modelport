@@ -74,11 +74,12 @@ function print(args: ParsedArgs, human: string, jsonValue: unknown): void {
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const config = await loadConfig();
   const url = new URL(path, config.hub_url);
+  const authorization = config.access_token ? `Bearer ${config.access_token}` : `Bearer dev:${config.user_email}`;
   const response = await fetch(url, {
     ...init,
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer dev:${config.user_email}`,
+      authorization,
       ...(init.headers || {})
     }
   });
@@ -119,6 +120,16 @@ async function login(args: ParsedArgs): Promise<void> {
   const hub = requireFlag(args, "hub");
   const user = requireFlag(args, "user");
   const config = await createDevConfig(hub, user);
+  const response = await fetch(new URL("/api/v1/auth/signup", config.hub_url), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: config.user_email })
+  });
+  const body = (await response.json()) as { token?: string; error?: { message?: string } };
+  if (!response.ok || !body.token) {
+    throw new Error(body.error?.message || `login failed: ${response.status}`);
+  }
+  config.access_token = body.token;
   await saveConfig(config);
   print(args, `Logged in to ${config.hub_url} as ${config.user_email}`, { status: "ok", config });
 }
