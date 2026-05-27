@@ -1,0 +1,24 @@
+{
+  "name": "modelport",
+  "version": "0.1.0",
+  "description": "Share local OpenAI-compatible model servers with your team through a lightweight tunnel hub.",
+  "type": "module",
+  "bin": {
+    "modelport": "dist/apps/cli/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev:hub": "node dist/apps/hub-api/src/server.js",
+    "start": "node dist/apps/hub-api/src/server.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "verify": "npm run check && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  }
+}
